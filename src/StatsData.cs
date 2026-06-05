@@ -136,6 +136,12 @@ namespace SPSMod
 
         [JsonProperty("ppgAgainst")]
         public int PPGAgainst { get; set; }
+
+        [JsonProperty("powerPlayOpportunities")]
+        public int PowerPlayOpportunities { get; set; }
+
+        [JsonProperty("penaltyKillOpportunities")]
+        public int PenaltyKillOpportunities { get; set; }
     }
 
     // ─── One completed match ─────────────────────────────────────────────────

@@ -8,3 +8,4 @@ C:\Users\w4ua\Documents\Code\Puck Mods\SPS Mod\bin\Debug\SPSMod.dll
 C:\Users\w4ua\Documents\Code\Puck Mods\SPS Mod\bin\Debug\SPSMod.pdb
 C:\Users\w4ua\Documents\Code\Puck Mods\SPS Mod\obj\Debug\SPSMod.dll
 C:\Users\w4ua\Documents\Code\Puck Mods\SPS Mod\obj\Debug\SPSMod.pdb
+C:\Users\w4ua\Documents\Code\Puck Mods\SPS Mod\obj\Debug\SPSMod.sourcelink.json

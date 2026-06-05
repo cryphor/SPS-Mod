@@ -31,6 +31,9 @@ namespace SPSMod
                 string enteringSteamId = stick.Player.SteamId.Value.ToString();
                 int puckId = __instance.GetInstanceID();
 
+                // Notify StatsTracker about stick-on-puck contact
+                StatsTracker.OnPuckStickHit(enteringSteamId, puckId);
+
                 // stick-to-stick transfer → previous carrier gets a pass
                 if (LastStickerByPuck.TryGetValue(puckId, out string prevSteamId) && prevSteamId != enteringSteamId)
                 {

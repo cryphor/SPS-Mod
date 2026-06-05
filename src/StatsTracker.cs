@@ -24,15 +24,9 @@ namespace SPSMod
 
         // ── Faceoff tracking ──
         private static bool _pendingFaceoff;
-        private static string _firstTouchAfterFaceoff; // steamId
 
         // ── Goal sequence for GWG computation ──
         private static int _goalIndex;
-
-        // ── Blocked shot tracking ──
-        // For each puck, track which defending players touched it since last attacking touch
-        // puck instance ID → set of defending steamIds who've touched it since last shot
-        private static readonly Dictionary<int, HashSet<string>> _defenderTouchesSinceLastShot = new();
 
         private static StatsDatabase _database;
 
@@ -67,67 +61,44 @@ namespace SPSMod
         public static void RecordPass(string steamId)
         {
             if (!_matchActive || _currentMatch == null) return;
-
             if (_currentMatch.Players.TryGetValue(steamId, out var stats))
                 stats.Passes++;
         }
 
-        public static void RecordHit(string steamId)
+        public static void OnPuckStickHit(string steamId, int puckId)
         {
             if (!_matchActive || _currentMatch == null) return;
 
-            if (_currentMatch.Players.TryGetValue(steamId, out var stats))
-                stats.Hits++;
-        }
-
-        public static void RecordFaceoffWin(string steamId)
-        {
-            if (!_matchActive || _currentMatch == null || !_pendingFaceoff) return;
-
-            if (_currentMatch.Players.TryGetValue(steamId, out var stats))
+            // First touch after faceoff → faceoff win
+            if (_pendingFaceoff)
             {
-                stats.FaceoffWins++;
+                _pendingFaceoff = false;
 
-                // Give faceoff loss to all opponents on the ice
-                var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
-                if (pm != null)
+                if (_currentMatch.Players.TryGetValue(steamId, out var winner))
                 {
-                    var winnerTeam = pm.GetPlayerBySteamId(steamId)?.Team ?? PlayerTeam.None;
-                    foreach (var player in pm.GetPlayers())
+                    winner.FaceoffWins++;
+
+                    // Give faceoff loss to all opponents on the ice
+                    var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
+                    if (pm != null)
                     {
-                        if (player.Phase == PlayerPhase.Play && player.Team != winnerTeam && player.Team != PlayerTeam.None && player.Team != PlayerTeam.Spectator)
+                        var winnerTeam = pm.GetPlayerBySteamId(steamId)?.Team ?? PlayerTeam.None;
+                        foreach (var player in pm.GetPlayers())
                         {
-                            var sid = player.SteamId.Value.ToString();
-                            if (_currentMatch.Players.TryGetValue(sid, out var loserStats))
-                                loserStats.FaceoffLosses++;
+                            if (player.Phase == PlayerPhase.Play &&
+                                player.Team != winnerTeam &&
+                                player.Team != PlayerTeam.None &&
+                                player.Team != PlayerTeam.Spectator)
+                            {
+                                var sid = player.SteamId.Value.ToString();
+                                if (_currentMatch.Players.TryGetValue(sid, out var loserStats))
+                                    loserStats.FaceoffLosses++;
+                            }
                         }
                     }
                 }
             }
 
-            _pendingFaceoff = false;
-        }
-
-        public static void RecordDefenderTouch(string puckId, string steamId, PlayerTeam defenderTeam)
-        {
-            if (!_matchActive || _currentMatch == null) return;
-
-            if (!_defenderTouchesSinceLastShot.ContainsKey(puckId))
-                _defenderTouchesSinceLastShot[puckId] = new HashSet<string>();
-
-            _defenderTouchesSinceLastShot[puckId].Add(steamId);
-        }
-
-        public static void OnPuckStickHit(string steamId, int puckId)
-        {
-            // If we're waiting for a faceoff touch, this is the faceoff win
-            if (_pendingFaceoff)
-            {
-                RecordFaceoffWin(steamId);
-            }
-
-            // Reset defender touches for this puck (attacker just touched it)
-            _defenderTouchesSinceLastShot.Remove(puckId);
         }
 
         // ── Event handlers ───────────────────────────────────────────────
@@ -149,31 +120,38 @@ namespace SPSMod
                 var sid = shooter.SteamId.Value.ToString();
                 var name = shooter.Username.Value.ToString();
                 GetOrCreatePlayerStats(sid, name).Shots++;
-            }
 
-            // ── Goalie involvement on defending side ──
-            var defenderCollisions = puck.GetPlayerCollisionsByTeam(defendingTeam);
-            foreach (var kv in defenderCollisions)
-            {
-                var defender = kv.Key;
-                if (defender.Role == PlayerRole.Goalie)
+                // Team shots
+                if (attackingTeam == PlayerTeam.Blue)
                 {
-                    var gid = defender.SteamId.Value.ToString();
-                    var gname = defender.Username.Value.ToString();
-                    GetOrCreatePlayerStats(gid, gname).ShotsAgainst++;
-
-                    _pendingGoalieGA[puck.GetInstanceID()] = gid;
-                    break;
+                    _currentMatch.BlueTeam.ShotsFor++;
+                    _currentMatch.RedTeam.ShotsAgainst++;
+                }
+                else
+                {
+                    _currentMatch.RedTeam.ShotsFor++;
+                    _currentMatch.BlueTeam.ShotsAgainst++;
                 }
             }
 
-            // ── Blocked shots: defending players who touched puck after last attacker touch ──
-            int puckId = puck.GetInstanceID();
-            if (_defenderTouchesSinceLastShot.TryGetValue(puckId, out var defenders))
+            // ── Defender tracking: goalie saves + blocked shots ──
+            var defenderCollisions = puck.GetPlayerCollisionsByTeam(defendingTeam);
+            bool goalieFound = false;
+            foreach (var kv in defenderCollisions)
             {
-                foreach (var defSid in defenders)
+                var defender = kv.Key;
+                if (defender.Role == PlayerRole.Goalie && !goalieFound)
                 {
-                    if (_currentMatch.Players.TryGetValue(defSid, out var blockStats))
+                    goalieFound = true;
+                    var gid = defender.SteamId.Value.ToString();
+                    var gname = defender.Username.Value.ToString();
+                    GetOrCreatePlayerStats(gid, gname).ShotsAgainst++;
+                    _pendingGoalieGA[puck.GetInstanceID()] = gid;
+                }
+                else if (defender.Role != PlayerRole.Goalie)
+                {
+                    var did = defender.SteamId.Value.ToString();
+                    if (_currentMatch.Players.TryGetValue(did, out var blockStats))
                         blockStats.ShotsBlocked++;
                 }
             }
@@ -289,10 +267,6 @@ namespace SPSMod
 
             _currentMatch.Goals.Add(goalEvent);
 
-            // ── Team shots tracking ──
-            _currentMatch.BlueTeam.ShotsFor += CountTeamShots(PlayerTeam.Blue);
-            _currentMatch.RedTeam.ShotsFor += CountTeamShots(PlayerTeam.Red);
-
             Plugin.Log($"Goal: {scorerName} — {_currentMatch.BlueScore}-{_currentMatch.RedScore}" +
                        (isPPG ? " (PPG)" : "") + (isSHG ? " (SHG)" : ""));
         }
@@ -375,7 +349,6 @@ namespace SPSMod
             _matchActive = true;
             _pendingGoalieGA.Clear();
             _playerPlayEnterTime.Clear();
-            _defenderTouchesSinceLastShot.Clear();
             _pendingFaceoff = false;
             _goalIndex = 0;
 
@@ -400,7 +373,24 @@ namespace SPSMod
             if (_currentMatch == null) return;
 
             // Flush any remaining TOI (players still in Play phase)
-            FlushRemainingTOI();
+            var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
+            if (pm != null)
+            {
+                foreach (var player in pm.GetPlayers())
+                {
+                    if (player.Phase == PlayerPhase.Play)
+                    {
+                        var sid = player.SteamId.Value.ToString();
+                        if (_playerPlayEnterTime.TryGetValue(sid, out var enterTime))
+                        {
+                            var elapsed = (int)(Time.time - enterTime);
+                            if (_currentMatch.Players.TryGetValue(sid, out var stats))
+                                stats.TimeOnIceSeconds += elapsed;
+                        }
+                    }
+                }
+            }
+            _playerPlayEnterTime.Clear();
 
             // Sync final scores from game state
             var gm = GameManager.Instance;
@@ -429,28 +419,6 @@ namespace SPSMod
             Plugin.Log($"Match {mId} finalized and saved");
         }
 
-        private static void FlushRemainingTOI()
-        {
-            var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
-            if (pm == null) return;
-
-            foreach (var player in pm.GetPlayers())
-            {
-                if (player.Phase == PlayerPhase.Play)
-                {
-                    var sid = player.SteamId.Value.ToString();
-                    if (_playerPlayEnterTime.TryGetValue(sid, out var enterTime))
-                    {
-                        var elapsed = (int)(Time.time - enterTime);
-                        if (_currentMatch.Players.TryGetValue(sid, out var stats))
-                            stats.TimeOnIceSeconds += elapsed;
-                    }
-                }
-            }
-
-            _playerPlayEnterTime.Clear();
-        }
-
         private static void ComputeGameWinningGoal()
         {
             if (_currentMatch.Goals.Count == 0) return;
@@ -463,7 +431,6 @@ namespace SPSMod
             bool blueWon = blueFinal > redFinal;
             int losingFinalScore = blueWon ? redFinal : blueFinal;
 
-            // Simulate the game goal by goal to find the GWG
             int blueScore = 0;
             int redScore = 0;
 
@@ -474,30 +441,14 @@ namespace SPSMod
 
                 int winningTeamScore = blueWon ? blueScore : redScore;
 
-                // If this is the first goal where the winning team's score
-                // exceeds what the losing team will end with, it's the GWG
+                // First goal where winning team's score exceeds losing team's final score
                 if (winningTeamScore > losingFinalScore)
                 {
-                    // Mark the scorer
                     if (_currentMatch.Players.TryGetValue(goal.ScorerSteamId, out var scorer))
                         scorer.GameWinningGoal = true;
                     break;
                 }
             }
-        }
-
-        private static int CountTeamShots(PlayerTeam team)
-        {
-            int count = 0;
-            foreach (var kv in _currentMatch.Players)
-            {
-                if (/* we don't have team in PlayerMatchStats, approximate via */
-                    true) // This is an approximation - we count all shots
-                {
-                    count += kv.Value.Shots;
-                }
-            }
-            return count;
         }
 
         private static PlayerMatchStats GetOrCreatePlayerStats(string steamId, string username)
@@ -518,6 +469,9 @@ namespace SPSMod
 
         private static void UpdatePlayCounts()
         {
+            bool wasBlueOnPP = _blueOnPP;
+            bool wasRedOnPP = _redOnPP;
+
             _bluePlayCount = 0;
             _redPlayCount = 0;
 
@@ -535,6 +489,21 @@ namespace SPSMod
 
             _blueOnPP = _bluePlayCount > _redPlayCount;
             _redOnPP = _redPlayCount > _bluePlayCount;
+
+            // Track PP/PK opportunities on transition to PP state
+            if (_matchActive && _currentMatch != null)
+            {
+                if (_blueOnPP && !wasBlueOnPP)
+                {
+                    _currentMatch.BlueTeam.PowerPlayOpportunities++;
+                    _currentMatch.RedTeam.PenaltyKillOpportunities++;
+                }
+                if (_redOnPP && !wasRedOnPP)
+                {
+                    _currentMatch.RedTeam.PowerPlayOpportunities++;
+                    _currentMatch.BlueTeam.PenaltyKillOpportunities++;
+                }
+            }
         }
     }
 }
