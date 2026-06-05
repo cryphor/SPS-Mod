@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <OutputType>Library</OutputType>
+    <LangVersion>10.0</LangVersion>
+    <AssemblyName>SPSMod</AssemblyName>
+    <RootNamespace>SPSMod</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj</BaseIntermediateOutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PUCK_DIR>C:\PROGRA~2\Steam\steamapps\common\Puck</PUCK_DIR>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="libs\*.dll"
+               Exclude="libs\System*.dll;libs\mscorlib.dll;libs\netstandard.dll;libs\Microsoft*.dll;libs\Mono*.dll">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="src\Plugin.cs" />
+    <Compile Include="src\StatsData.cs" />
+    <Compile Include="src\StatsTracker.cs" />
+    <Compile Include="src\PatchPuckCollisions.cs" />
+    <Compile Include="src\StatsApi.cs" />
+  </ItemGroup>
+
+  <Target Name="CopyToPlugins" AfterTargets="Build">
+    <MakeDir Directories="$(PUCK_DIR)\Plugins\SPSMod" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PUCK_DIR)\Plugins\SPSMod\" SkipUnchangedFiles="false" />
+    <Message Text="Deployed $(TargetFileName) to $(PUCK_DIR)\Plugins\SPSMod\" Importance="high" />
+  </Target>
+
+</Project>
