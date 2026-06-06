@@ -104,6 +104,22 @@ namespace SPSMod
         public int GoalIndex { get; set; } // 1st goal of game, 2nd, etc.
     }
 
+    // ─── Play-by-play event (goal, shot, faceoff) ─────────────────────────
+    public class PlayByPlayEvent
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = ""; // "goal", "shot", "faceoff"
+
+        [JsonProperty("team")]
+        public string Team { get; set; } = ""; // "blue" or "red"
+
+        [JsonProperty("playerName")]
+        public string PlayerName { get; set; } = "";
+
+        [JsonProperty("detail")]
+        public string Detail { get; set; } = ""; // assists for goals, "won" for faceoff
+    }
+
     // ─── Per-team stats for one match ────────────────────────────────────────
     public class TeamMatchStats
     {
@@ -144,6 +160,9 @@ namespace SPSMod
         [JsonProperty("goals")]
         public List<GoalEvent> Goals { get; set; } = new();
 
+        [JsonProperty("playByPlay")]
+        public List<PlayByPlayEvent> PlayByPlay { get; set; } = new();
+
         [JsonProperty("blueTeam")]
         public TeamMatchStats BlueTeam { get; set; } = new();
 
@@ -179,8 +198,17 @@ namespace SPSMod
         [JsonProperty("active")]
         public bool Active { get; set; }
 
+        [JsonProperty("timeRemaining")]
+        public int TimeRemaining { get; set; }
+
         [JsonProperty("players")]
         public List<LivePlayerEntry> Players { get; set; } = new();
+
+        [JsonProperty("goals")]
+        public List<GoalEvent> Goals { get; set; } = new();
+
+        [JsonProperty("playByPlay")]
+        public List<PlayByPlayEvent> PlayByPlay { get; set; } = new();
     }
 
     public class LivePlayerEntry

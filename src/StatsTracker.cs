@@ -28,6 +28,18 @@ namespace SPSMod
         // ── Goal sequence for GWG computation ──
         private static int _goalIndex;
 
+        // ── 30s live push timer ──
+        private static CancellationTokenSource _livePushCts;
+
+        // ── Player session data (survives disconnect for live view) ──
+        private class PlayerLiveInfo
+        {
+            public int Number;
+            public string Team = "";
+            public string Role = "";
+        }
+        private static readonly Dictionary<string, PlayerLiveInfo> _playerLiveInfo = new();
+
         private static StatsDatabase _database;
 
         private static string _serverName = "Server";
@@ -85,6 +97,16 @@ namespace SPSMod
                 {
                     winner.FaceoffWins++;
 
+                    // Record faceoff win in play-by-play
+                    var pbpPm = MonoBehaviourSingleton<PlayerManager>.Instance;
+                    var pbpTeam = pbpPm?.GetPlayerBySteamId(steamId)?.Team ?? PlayerTeam.None;
+                    _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+                    {
+                        Type = "faceoff",
+                        Team = pbpTeam == PlayerTeam.Blue ? "blue" : pbpTeam == PlayerTeam.Red ? "red" : "",
+                        PlayerName = winner.Username
+                    });
+
                     // Give faceoff loss to all opponents on the ice
                     var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
                     if (pm != null)
@@ -114,6 +136,11 @@ namespace SPSMod
         {
             if (!_matchActive || _currentMatch == null) return;
 
+            // Only count shots during active Play phase — prevents dribbles,
+            // practice pucks, and post-goal pucks from inflating shot totals
+            var gm = GameManager.Instance;
+            if (gm == null || gm.GameState.Value.Phase != GamePhase.Play) return;
+
             var defendingTeam = (PlayerTeam)message["team"];
             var puck = (Puck)message["puck"];
 
@@ -127,6 +154,14 @@ namespace SPSMod
                 var sid = shooter.SteamId.Value.ToString();
                 var name = shooter.Username.Value.ToString();
                 GetOrCreatePlayerStats(sid, name).Shots++;
+
+                // Record shot in play-by-play
+                _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+                {
+                    Type = "shot",
+                    Team = attackingTeam == PlayerTeam.Blue ? "blue" : "red",
+                    PlayerName = name
+                });
 
                 // Team shots
                 if (attackingTeam == PlayerTeam.Blue)
@@ -234,6 +269,14 @@ namespace SPSMod
                             stats.PlusMinus++;
                         else if (player.Team == defendingTeam)
                             stats.PlusMinus--;
+
+                        // Keep session info up to date for live view
+                        _playerLiveInfo[sid] = new PlayerLiveInfo
+                        {
+                            Number = player.Number.Value,
+                            Team = player.Team == PlayerTeam.Blue ? "blue" : "red",
+                            Role = player.Role == PlayerRole.Goalie ? "goalie" : "attacker"
+                        };
                     }
                 }
             }
@@ -254,10 +297,25 @@ namespace SPSMod
 
             _currentMatch.Goals.Add(goalEvent);
 
+            // Record goal in play-by-play
+            var assistParts = new List<string>();
+            if (assistPlayer != null && assistPlayer.SteamId.Value.Value.Length > 0)
+                assistParts.Add(assistPlayer.Username.Value.ToString());
+            if (secondAssist != null && secondAssist.SteamId.Value.Value.Length > 0)
+                assistParts.Add(secondAssist.Username.Value.ToString());
+            var assistDetail = assistParts.Count > 0 ? $"({string.Join(", ", assistParts)})" : "";
+
+            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+            {
+                Type = "goal",
+                Team = scoringTeam == PlayerTeam.Blue ? "blue" : "red",
+                PlayerName = scorerName,
+                Detail = assistDetail
+            });
+
             Plugin.Log($"Goal: {scorerName} — {_currentMatch.BlueScore}-{_currentMatch.RedScore}");
 
-            // ── Push live state ──
-            PushLive();
+            // Don't PushLive here — 30s periodic timer handles it
         }
 
         private static void OnPlayerGameStateChanged(Dictionary<string, object> message)
@@ -305,10 +363,13 @@ namespace SPSMod
                     StartNewMatch();
             }
 
-            // Play starting after FaceOff → arm faceoff detection
+            // Play starting after FaceOff → arm faceoff detection + push live
+            // (GameState.Tick is now tickRemainder = period clock, not faceoff timer)
             if (newState.Phase == GamePhase.Play && oldState.Phase == GamePhase.FaceOff)
             {
                 _pendingFaceoff = _matchActive;
+                if (_matchActive && _currentMatch != null)
+                    PushLive();
             }
 
             // Play → anything else → disarm faceoff
@@ -339,11 +400,17 @@ namespace SPSMod
                 }
             }
 
-            // Period transition → push live state
+            // Period transition → update period + push live state
             if (newState.Phase == GamePhase.Intermission || newState.Phase == GamePhase.FaceOff)
             {
                 if (_matchActive && _currentMatch != null)
+                {
+                    // Update period from game state (the game increments period before Intermission)
+                    var gm = GameManager.Instance;
+                    if (gm != null)
+                        _currentMatch.Period = gm.GameState.Value.Period;
                     PushLive();
+                }
             }
         }
 
@@ -444,6 +511,7 @@ namespace SPSMod
 
             // Snapshot current players
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
+            _playerLiveInfo.Clear();
             if (pm != null)
             {
                 foreach (var player in pm.GetPlayers())
@@ -451,6 +519,12 @@ namespace SPSMod
                     var sid = player.SteamId.Value.ToString();
                     var name = player.Username.Value.ToString();
                     GetOrCreatePlayerStats(sid, name);
+                    _playerLiveInfo[sid] = new PlayerLiveInfo
+                    {
+                        Number = player.Number.Value,
+                        Team = player.Team == PlayerTeam.Blue ? "blue" : player.Team == PlayerTeam.Red ? "red" : "",
+                        Role = player.Role == PlayerRole.Goalie ? "goalie" : "attacker"
+                    };
                 }
             }
 
@@ -458,6 +532,21 @@ namespace SPSMod
 
             // Push initial live state
             PushLive();
+
+            // Start 30-second periodic live push
+            _livePushCts?.Cancel();
+            _livePushCts = new CancellationTokenSource();
+            var token = _livePushCts.Token;
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try { await System.Threading.Tasks.Task.Delay(30000, token); }
+                    catch (System.Threading.Tasks.TaskCanceledException) { break; }
+                    if (_matchActive && _currentMatch != null)
+                        PushLive();
+                }
+            });
         }
 
         private static void FinalizeMatch()
@@ -505,17 +594,49 @@ namespace SPSMod
             StatsApi.Save(_database);
 
             // Push inactive live state so frontend knows match ended
-            StatsApi.PushLiveState(new LiveMatchState
+            var finalState = new LiveMatchState
             {
                 MatchId = _currentMatch.MatchId,
                 ServerName = _serverName,
                 Active = false,
                 Period = _currentMatch.Period,
                 BlueScore = _currentMatch.BlueScore,
-                RedScore = _currentMatch.RedScore
-            });
+                RedScore = _currentMatch.RedScore,
+                TimeRemaining = 0,
+                Goals = _currentMatch.Goals,
+                PlayByPlay = _currentMatch.PlayByPlay
+            };
+            // Include final player stats
+            foreach (var kv in _currentMatch.Players)
+            {
+                if (_playerLiveInfo.TryGetValue(kv.Key, out var li))
+                {
+                    finalState.Players.Add(new LivePlayerEntry
+                    {
+                        SteamId = kv.Key,
+                        Username = kv.Value.Username,
+                        Number = li.Number,
+                        Team = li.Team,
+                        Role = li.Role,
+                        Goals = kv.Value.Goals,
+                        Assists = kv.Value.Assists,
+                        Shots = kv.Value.Shots,
+                        Saves = kv.Value.Saves,
+                        ShotsAgainst = kv.Value.ShotsAgainst,
+                        GoalsAgainst = kv.Value.GoalsAgainst,
+                        PlusMinus = kv.Value.PlusMinus,
+                        Hits = kv.Value.Hits,
+                        ShotsBlocked = kv.Value.ShotsBlocked,
+                        FaceoffWins = kv.Value.FaceoffWins,
+                        FaceoffLosses = kv.Value.FaceoffLosses,
+                        TimeOnIceSeconds = kv.Value.TimeOnIceSeconds,
+                    });
+                }
+            }
+            StatsApi.PushLiveState(finalState);
 
             _matchActive = false;
+            _livePushCts?.Cancel();
             var mId = _currentMatch.MatchId;
             _currentMatch = null;
 
@@ -567,6 +688,26 @@ namespace SPSMod
                 };
                 _currentMatch.Players[steamId] = stats;
             }
+
+            // Snapshot session info for live view (survives disconnect)
+            if (!_playerLiveInfo.ContainsKey(steamId))
+            {
+                var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
+                if (pm != null)
+                {
+                    var p = pm.GetPlayerBySteamId(steamId);
+                    if (p != null)
+                    {
+                        _playerLiveInfo[steamId] = new PlayerLiveInfo
+                        {
+                            Number = p.Number.Value,
+                            Team = p.Team == PlayerTeam.Blue ? "blue" : p.Team == PlayerTeam.Red ? "red" : "",
+                            Role = p.Role == PlayerRole.Goalie ? "goalie" : "attacker"
+                        };
+                    }
+                }
+            }
+
             return stats;
         }
 
@@ -583,41 +724,74 @@ namespace SPSMod
                 Active = true,
                 Period = _currentMatch.Period,
                 BlueScore = _currentMatch.BlueScore,
-                RedScore = _currentMatch.RedScore
+                RedScore = _currentMatch.RedScore,
+                TimeRemaining = GameManager.Instance?.GameState.Value.Tick ?? 0
             };
 
+            // Include goal events and play-by-play
+            state.Goals = _currentMatch.Goals;
+            state.PlayByPlay = _currentMatch.PlayByPlay;
+
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
-            if (pm != null)
+
+            // Iterate ALL players who participated (not just currently connected)
+            foreach (var kv in _currentMatch.Players)
             {
-                foreach (var player in pm.GetPlayers())
+                var sid = kv.Key;
+                var stats = kv.Value;
+
+                // Try to get current connection info from PlayerManager
+                var livePlayer = pm?.GetPlayerBySteamId(sid);
+                string team, role;
+                int number;
+
+                if (livePlayer != null)
                 {
-                    if (player.Team == PlayerTeam.None || player.Team == PlayerTeam.Spectator)
+                    // Player is still connected — use live data
+                    if (livePlayer.Team == PlayerTeam.None || livePlayer.Team == PlayerTeam.Spectator)
+                        continue; // skip spectators in live view
+
+                    number = livePlayer.Number.Value;
+                    team = livePlayer.Team == PlayerTeam.Blue ? "blue" : "red";
+                    role = livePlayer.Role == PlayerRole.Goalie ? "goalie" : "attacker";
+
+                    // Update stored session info
+                    _playerLiveInfo[sid] = new PlayerLiveInfo { Number = number, Team = team, Role = role };
+                }
+                else
+                {
+                    // Player disconnected — use stored session info
+                    if (!_playerLiveInfo.TryGetValue(sid, out var stored))
+                        continue; // never seen this player, skip
+
+                    if (string.IsNullOrEmpty(stored.Team) || stored.Team == "")
                         continue;
 
-                    var sid = player.SteamId.Value.ToString();
-                    var stats = _currentMatch.Players.TryGetValue(sid, out var ms) ? ms : null;
-
-                    state.Players.Add(new LivePlayerEntry
-                    {
-                        SteamId = sid,
-                        Username = player.Username.Value.ToString(),
-                        Number = player.Number.Value,
-                        Team = player.Team == PlayerTeam.Blue ? "blue" : "red",
-                        Role = player.Role == PlayerRole.Goalie ? "goalie" : "attacker",
-                        Goals = stats?.Goals ?? 0,
-                        Assists = stats?.Assists ?? 0,
-                        Shots = stats?.Shots ?? 0,
-                        Saves = player.Role == PlayerRole.Goalie ? stats?.ShotsAgainst ?? 0 : 0,
-                        ShotsAgainst = stats?.ShotsAgainst ?? 0,
-                        GoalsAgainst = stats?.GoalsAgainst ?? 0,
-                        PlusMinus = stats?.PlusMinus ?? 0,
-                        Hits = stats?.Hits ?? 0,
-                        ShotsBlocked = stats?.ShotsBlocked ?? 0,
-                        FaceoffWins = stats?.FaceoffWins ?? 0,
-                        FaceoffLosses = stats?.FaceoffLosses ?? 0,
-                        TimeOnIceSeconds = stats?.TimeOnIceSeconds ?? 0,
-                    });
+                    number = stored.Number;
+                    team = stored.Team;
+                    role = stored.Role;
                 }
+
+                state.Players.Add(new LivePlayerEntry
+                {
+                    SteamId = sid,
+                    Username = stats.Username,
+                    Number = number,
+                    Team = team,
+                    Role = role,
+                    Goals = stats.Goals,
+                    Assists = stats.Assists,
+                    Shots = stats.Shots,
+                    Saves = stats.Saves,
+                    ShotsAgainst = stats.ShotsAgainst,
+                    GoalsAgainst = stats.GoalsAgainst,
+                    PlusMinus = stats.PlusMinus,
+                    Hits = stats.Hits,
+                    ShotsBlocked = stats.ShotsBlocked,
+                    FaceoffWins = stats.FaceoffWins,
+                    FaceoffLosses = stats.FaceoffLosses,
+                    TimeOnIceSeconds = stats.TimeOnIceSeconds,
+                });
             }
 
             StatsApi.PushLiveState(state);
