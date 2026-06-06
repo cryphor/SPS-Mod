@@ -7,7 +7,7 @@ namespace SPSMod
     {
         public const string MOD_NAME = "SPSMod";
         public const string MOD_VERSION = "1.0.0";
-        public const string MOD_GUID = "pw.stellaric.sps.stats";
+        public const string MOD_GUID = "sps";
 
         private static readonly Harmony _harmony = new(MOD_GUID);
 
