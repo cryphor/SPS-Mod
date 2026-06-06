@@ -10,7 +10,7 @@ namespace SPSMod
         private static readonly HttpClient _client = new();
 
         // ── CHANGE THIS to your Vercel deployment URL ──
-        private const string ApiUrl = "https://sps-dashboard-ten.vercel.app/api/stats";
+        private const string ApiUrl = "https://spsdashboard.vercel.app/api/stats";
 
         public static StatsDatabase Load()
         {
@@ -52,6 +52,19 @@ namespace SPSMod
             {
                 Plugin.Log($"StatsApi.Save failed: {ex.Message}");
             }
+        }
+
+        private const string LiveApiUrl = "https://spsdashboard.vercel.app/api/live";
+
+        public static void PushLiveState(LiveMatchState state)
+        {
+            try
+            {
+                var json = JsonConvert.SerializeObject(state, Formatting.None);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var response = _client.PostAsync(LiveApiUrl, content).GetAwaiter().GetResult();
+            }
+            catch { /* fire-and-forget, don't spam logs */ }
         }
     }
 }

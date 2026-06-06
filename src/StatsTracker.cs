@@ -1,7 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Reflection;
+using System.Threading;
 using UnityEngine;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace SPSMod
 {
@@ -9,12 +15,6 @@ namespace SPSMod
     {
         private static MatchRecord _currentMatch;
         private static bool _matchActive;
-
-        // Players in Play phase per team (for PP detection)
-        private static int _bluePlayCount;
-        private static int _redPlayCount;
-        private static bool _blueOnPP;
-        private static bool _redOnPP;
 
         // Track goalie who was last on defense when puck entered goal
         private static readonly Dictionary<int, string> _pendingGoalieGA = new();
@@ -30,12 +30,19 @@ namespace SPSMod
 
         private static StatsDatabase _database;
 
+        private static string _serverName = "Server";
+
         // ── Init / Shutdown ──────────────────────────────────────────────
 
         public static void Initialize()
         {
             _database = StatsApi.Load();
             _matchActive = false;
+
+            // Fetch server name from puckstats.io — delayed 10s after startup
+            ScheduleServerNameFetch();
+
+            Plugin.Log($"Server name: {_serverName}");
 
             EventManager.AddEventListener("Event_Server_OnPuckEnterGoal", OnPuckEnterGoal);
             EventManager.AddEventListener("Event_Everyone_OnGoalScored", OnGoalScored);
@@ -190,24 +197,6 @@ namespace SPSMod
                 GetOrCreatePlayerStats(sid, sname).Assists++;
             }
 
-            // ── PPG / SHG ──
-            bool isPPG = scoringTeam == PlayerTeam.Blue ? _blueOnPP : _redOnPP;
-            bool isSHG = scoringTeam == PlayerTeam.Blue ? _redOnPP : _blueOnPP;
-
-            if (isPPG)
-            {
-                scorerStats.PowerPlayGoals++;
-                if (scoringTeam == PlayerTeam.Blue)
-                    _currentMatch.BlueTeam.PPG++;
-                else
-                    _currentMatch.RedTeam.PPG++;
-            }
-
-            if (isSHG)
-            {
-                scorerStats.ShortHandedGoals++;
-            }
-
             // ── Goalie goals-against ──
             int puckIdInstance = puck.GetInstanceID();
             if (_pendingGoalieGA.TryGetValue(puckIdInstance, out var goalieId))
@@ -255,8 +244,6 @@ namespace SPSMod
             {
                 ScoringTeam = scoringTeam == PlayerTeam.Blue ? "blue" : "red",
                 ScorerSteamId = scorerId,
-                IsPowerPlay = isPPG,
-                IsShortHanded = isSHG,
                 GoalIndex = _goalIndex
             };
 
@@ -267,8 +254,10 @@ namespace SPSMod
 
             _currentMatch.Goals.Add(goalEvent);
 
-            Plugin.Log($"Goal: {scorerName} — {_currentMatch.BlueScore}-{_currentMatch.RedScore}" +
-                       (isPPG ? " (PPG)" : "") + (isSHG ? " (SHG)" : ""));
+            Plugin.Log($"Goal: {scorerName} — {_currentMatch.BlueScore}-{_currentMatch.RedScore}");
+
+            // ── Push live state ──
+            PushLive();
         }
 
         private static void OnPlayerGameStateChanged(Dictionary<string, object> message)
@@ -302,8 +291,6 @@ namespace SPSMod
                     }
                 }
             }
-
-            UpdatePlayCounts();
         }
 
         private static void OnGameStateChanged(Dictionary<string, object> message)
@@ -336,12 +323,115 @@ namespace SPSMod
                 if (_matchActive && _currentMatch != null)
                     FinalizeMatch();
             }
+
+            // Forced match end: Play/FaceOff → Warmup/None/PreGame while match active
+            if (_matchActive && _currentMatch != null)
+            {
+                bool wasPlaying = oldState.Phase == GamePhase.Play || oldState.Phase == GamePhase.FaceOff
+                    || oldState.Phase == GamePhase.Replay || oldState.Phase == GamePhase.Intermission;
+                bool isStopped = newState.Phase == GamePhase.Warmup || newState.Phase == GamePhase.None
+                    || newState.Phase == GamePhase.PreGame || newState.Phase == GamePhase.PostGame;
+
+                if (wasPlaying && isStopped)
+                {
+                    Plugin.Log("Match forcefully ended — finalizing");
+                    FinalizeMatch();
+                }
+            }
+
+            // Period transition → push live state
+            if (newState.Phase == GamePhase.Intermission || newState.Phase == GamePhase.FaceOff)
+            {
+                if (_matchActive && _currentMatch != null)
+                    PushLive();
+            }
+        }
+
+        // ── Server name from puckstats.io ──────────────────────────────
+
+        private static void ScheduleServerNameFetch()
+        {
+            // Capture the server port now (on main thread, ServerManager should be up)
+            ushort? ownPort = null;
+            try
+            {
+                var sm = NetworkBehaviourSingleton<ServerManager>.Instance;
+                if (sm?.ServerConfig != null)
+                    ownPort = sm.ServerConfig.port;
+            }
+            catch { }
+
+            var capturedPort = ownPort;
+            Plugin.Log($"Will fetch server name from puckstats.io in 10s (port: {capturedPort?.ToString() ?? "unknown"})");
+
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                await System.Threading.Tasks.Task.Delay(10000);
+                FetchServerNameFromPuckStats(capturedPort);
+            });
+        }
+
+        private static void FetchServerNameFromPuckStats(ushort? ownPort)
+        {
+            const string ip = "207.2.120.215";
+
+            try
+            {
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(5);
+                client.DefaultRequestHeaders.Add("User-Agent", "SPSMod/1.0");
+
+                // Try own port first, then scan 1-50
+                var portsToTry = new List<ushort>();
+                if (ownPort.HasValue)
+                    portsToTry.Add(ownPort.Value);
+                for (ushort p = 1; p <= 50; p++)
+                {
+                    if (!portsToTry.Contains(p))
+                        portsToTry.Add(p);
+                }
+
+                foreach (var port in portsToTry)
+                {
+                    try
+                    {
+                        var url = $"https://puckstats.io/api/server-list/server?ip={ip}&port={port}";
+                        var json = client.GetStringAsync(url).Result;
+
+                        var data = JObject.Parse(json);
+                        var names = data["names"] as JArray;
+                        if (names != null && names.Count > 0)
+                        {
+                            var firstName = names[0]["name"]?.Value<string>();
+                            if (!string.IsNullOrEmpty(firstName))
+                            {
+                                _serverName = firstName;
+                                Plugin.Log($"Server name '{_serverName}' from puckstats.io API (port {port})");
+                                return;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Port has no server or timed out — keep scanning
+                    }
+                }
+
+                Plugin.Log($"No server name found on any port 1-50");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log($"Failed to fetch from puckstats.io: {ex.Message}");
+            }
         }
 
         // ── Helpers ──────────────────────────────────────────────────────
 
         private static void StartNewMatch()
         {
+            // Re-fetch from API to pick up any external changes (e.g. data reset)
+            _database = StatsApi.Load();
+
             _currentMatch = new MatchRecord
             {
                 Timestamp = DateTime.UtcNow.ToString("o")
@@ -364,8 +454,10 @@ namespace SPSMod
                 }
             }
 
-            UpdatePlayCounts();
             Plugin.Log("New match started");
+
+            // Push initial live state
+            PushLive();
         }
 
         private static void FinalizeMatch()
@@ -411,6 +503,17 @@ namespace SPSMod
 
             _database.Matches.Add(_currentMatch);
             StatsApi.Save(_database);
+
+            // Push inactive live state so frontend knows match ended
+            StatsApi.PushLiveState(new LiveMatchState
+            {
+                MatchId = _currentMatch.MatchId,
+                ServerName = _serverName,
+                Active = false,
+                Period = _currentMatch.Period,
+                BlueScore = _currentMatch.BlueScore,
+                RedScore = _currentMatch.RedScore
+            });
 
             _matchActive = false;
             var mId = _currentMatch.MatchId;
@@ -467,43 +570,57 @@ namespace SPSMod
             return stats;
         }
 
-        private static void UpdatePlayCounts()
-        {
-            bool wasBlueOnPP = _blueOnPP;
-            bool wasRedOnPP = _redOnPP;
+        // ── Live state push ─────────────────────────────────────────────
 
-            _bluePlayCount = 0;
-            _redPlayCount = 0;
+        private static void PushLive()
+        {
+            if (_currentMatch == null) return;
+
+            var state = new LiveMatchState
+            {
+                MatchId = _currentMatch.MatchId,
+                ServerName = _serverName,
+                Active = true,
+                Period = _currentMatch.Period,
+                BlueScore = _currentMatch.BlueScore,
+                RedScore = _currentMatch.RedScore
+            };
 
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
-            if (pm == null) return;
-
-            foreach (var player in pm.GetPlayers())
+            if (pm != null)
             {
-                if (player.Phase == PlayerPhase.Play)
+                foreach (var player in pm.GetPlayers())
                 {
-                    if (player.Team == PlayerTeam.Blue) _bluePlayCount++;
-                    else if (player.Team == PlayerTeam.Red) _redPlayCount++;
+                    if (player.Team == PlayerTeam.None || player.Team == PlayerTeam.Spectator)
+                        continue;
+
+                    var sid = player.SteamId.Value.ToString();
+                    var stats = _currentMatch.Players.TryGetValue(sid, out var ms) ? ms : null;
+
+                    state.Players.Add(new LivePlayerEntry
+                    {
+                        SteamId = sid,
+                        Username = player.Username.Value.ToString(),
+                        Number = player.Number.Value,
+                        Team = player.Team == PlayerTeam.Blue ? "blue" : "red",
+                        Role = player.Role == PlayerRole.Goalie ? "goalie" : "attacker",
+                        Goals = stats?.Goals ?? 0,
+                        Assists = stats?.Assists ?? 0,
+                        Shots = stats?.Shots ?? 0,
+                        Saves = player.Role == PlayerRole.Goalie ? stats?.ShotsAgainst ?? 0 : 0,
+                        ShotsAgainst = stats?.ShotsAgainst ?? 0,
+                        GoalsAgainst = stats?.GoalsAgainst ?? 0,
+                        PlusMinus = stats?.PlusMinus ?? 0,
+                        Hits = stats?.Hits ?? 0,
+                        ShotsBlocked = stats?.ShotsBlocked ?? 0,
+                        FaceoffWins = stats?.FaceoffWins ?? 0,
+                        FaceoffLosses = stats?.FaceoffLosses ?? 0,
+                        TimeOnIceSeconds = stats?.TimeOnIceSeconds ?? 0,
+                    });
                 }
             }
 
-            _blueOnPP = _bluePlayCount > _redPlayCount;
-            _redOnPP = _redPlayCount > _bluePlayCount;
-
-            // Track PP/PK opportunities on transition to PP state
-            if (_matchActive && _currentMatch != null)
-            {
-                if (_blueOnPP && !wasBlueOnPP)
-                {
-                    _currentMatch.BlueTeam.PowerPlayOpportunities++;
-                    _currentMatch.RedTeam.PenaltyKillOpportunities++;
-                }
-                if (_redOnPP && !wasRedOnPP)
-                {
-                    _currentMatch.RedTeam.PowerPlayOpportunities++;
-                    _currentMatch.BlueTeam.PenaltyKillOpportunities++;
-                }
-            }
+            StatsApi.PushLiveState(state);
         }
     }
 }

@@ -39,12 +39,6 @@ namespace SPSMod
 
         // ── New NHL-style stats ──
 
-        [JsonProperty("powerPlayGoals")]
-        public int PowerPlayGoals { get; set; }
-
-        [JsonProperty("shortHandedGoals")]
-        public int ShortHandedGoals { get; set; }
-
         [JsonProperty("gameWinningGoal")]
         public bool GameWinningGoal { get; set; }
 
@@ -106,12 +100,6 @@ namespace SPSMod
         [JsonProperty("assistSteamIds")]
         public List<string> AssistSteamIds { get; set; } = new();
 
-        [JsonProperty("isPowerPlay")]
-        public bool IsPowerPlay { get; set; }
-
-        [JsonProperty("isShortHanded")]
-        public bool IsShortHanded { get; set; }
-
         [JsonProperty("goalIndex")]
         public int GoalIndex { get; set; } // 1st goal of game, 2nd, etc.
     }
@@ -130,18 +118,6 @@ namespace SPSMod
 
         [JsonProperty("shotsAgainst")]
         public int ShotsAgainst { get; set; }
-
-        [JsonProperty("ppg")]
-        public int PPG { get; set; }
-
-        [JsonProperty("ppgAgainst")]
-        public int PPGAgainst { get; set; }
-
-        [JsonProperty("powerPlayOpportunities")]
-        public int PowerPlayOpportunities { get; set; }
-
-        [JsonProperty("penaltyKillOpportunities")]
-        public int PenaltyKillOpportunities { get; set; }
     }
 
     // ─── One completed match ─────────────────────────────────────────────────
@@ -180,5 +156,84 @@ namespace SPSMod
     {
         [JsonProperty("matches")]
         public List<MatchRecord> Matches { get; set; } = new();
+    }
+
+    // ─── Live match state (pushed to API every goal/period) ──────────────────
+    public class LiveMatchState
+    {
+        [JsonProperty("matchId")]
+        public string MatchId { get; set; } = "";
+
+        [JsonProperty("serverName")]
+        public string ServerName { get; set; } = "";
+
+        [JsonProperty("period")]
+        public int Period { get; set; }
+
+        [JsonProperty("blueScore")]
+        public int BlueScore { get; set; }
+
+        [JsonProperty("redScore")]
+        public int RedScore { get; set; }
+
+        [JsonProperty("active")]
+        public bool Active { get; set; }
+
+        [JsonProperty("players")]
+        public List<LivePlayerEntry> Players { get; set; } = new();
+    }
+
+    public class LivePlayerEntry
+    {
+        [JsonProperty("steamId")]
+        public string SteamId { get; set; } = "";
+
+        [JsonProperty("username")]
+        public string Username { get; set; } = "";
+
+        [JsonProperty("number")]
+        public int Number { get; set; }
+
+        [JsonProperty("team")]
+        public string Team { get; set; } = ""; // "blue" or "red"
+
+        [JsonProperty("role")]
+        public string Role { get; set; } = ""; // "attacker" or "goalie"
+
+        [JsonProperty("goals")]
+        public int Goals { get; set; }
+
+        [JsonProperty("assists")]
+        public int Assists { get; set; }
+
+        [JsonProperty("shots")]
+        public int Shots { get; set; }
+
+        [JsonProperty("saves")]
+        public int Saves { get; set; }
+
+        [JsonProperty("shotsAgainst")]
+        public int ShotsAgainst { get; set; }
+
+        [JsonProperty("goalsAgainst")]
+        public int GoalsAgainst { get; set; }
+
+        [JsonProperty("plusMinus")]
+        public int PlusMinus { get; set; }
+
+        [JsonProperty("hits")]
+        public int Hits { get; set; }
+
+        [JsonProperty("shotsBlocked")]
+        public int ShotsBlocked { get; set; }
+
+        [JsonProperty("faceoffWins")]
+        public int FaceoffWins { get; set; }
+
+        [JsonProperty("faceoffLosses")]
+        public int FaceoffLosses { get; set; }
+
+        [JsonProperty("timeOnIceSeconds")]
+        public int TimeOnIceSeconds { get; set; }
     }
 }
