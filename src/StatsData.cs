@@ -39,6 +39,9 @@ namespace SPSMod
 
         // ── New NHL-style stats ──
 
+        [JsonProperty("shotAttempts")]
+        public int ShotAttempts { get; set; }
+
         [JsonProperty("gameWinningGoal")]
         public bool GameWinningGoal { get; set; }
 
@@ -248,6 +251,9 @@ namespace SPSMod
 
         [JsonProperty("plusMinus")]
         public int PlusMinus { get; set; }
+
+        [JsonProperty("shotAttempts")]
+        public int ShotAttempts { get; set; }
 
         [JsonProperty("hits")]
         public int Hits { get; set; }

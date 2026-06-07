@@ -25,6 +25,17 @@ namespace SPSMod
         // ── Faceoff tracking ──
         private static bool _pendingFaceoff;
 
+        // ── Pending shot tracking ──
+        private class PendingShotInfo
+        {
+            public string SteamId;
+            public string PlayerName;
+            public string Team; // "blue" or "red"
+            public float Timestamp; // Time.time
+        }
+        private static readonly Dictionary<int, PendingShotInfo> _pendingShotByPuck = new();
+        private const float SHOT_TIMEOUT_SECONDS = 3.0f;
+
         // ── Goal sequence for GWG computation ──
         private static int _goalIndex;
 
@@ -45,6 +56,16 @@ namespace SPSMod
         private static string _serverName = "Server";
 
         // ── Init / Shutdown ──────────────────────────────────────────────
+
+        /// <summary>
+        /// Called from StatsApi.LoadAsync when the background fetch completes.
+        /// Replaces the in-memory database without blocking startup.
+        /// </summary>
+        internal static void ReplaceDatabase(StatsDatabase db)
+        {
+            if (db != null)
+                _database = db;
+        }
 
         public static void Initialize()
         {
@@ -111,8 +132,10 @@ namespace SPSMod
                     var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
                     if (pm != null)
                     {
-                        var winnerTeam = pm.GetPlayerBySteamId(steamId)?.Team ?? PlayerTeam.None;
-                        foreach (var player in pm.GetPlayers())
+                        var winnerTeam = pbpTeam; // already resolved above
+                        var playersList = pm.GetPlayers();
+                        var matchPlayers = _currentMatch.Players; // cache
+                        foreach (var player in playersList)
                         {
                             if (player.Phase == PlayerPhase.Play &&
                                 player.Team != winnerTeam &&
@@ -120,7 +143,7 @@ namespace SPSMod
                                 player.Team != PlayerTeam.Spectator)
                             {
                                 var sid = player.SteamId.Value.ToString();
-                                if (_currentMatch.Players.TryGetValue(sid, out var loserStats))
+                                if (matchPlayers.TryGetValue(sid, out var loserStats))
                                     loserStats.FaceoffLosses++;
                             }
                         }
@@ -128,6 +151,123 @@ namespace SPSMod
                 }
             }
 
+        }
+
+        /// <summary>
+        /// Called from PatchPuckCollisions when a stick leaves the puck
+        /// with ShotSpeed above threshold. Records a pending shot attempt
+        /// that will later be resolved as SOG, block, or miss.
+        /// </summary>
+        public static void OnShotAttempt(string steamId, int puckId, float speed, string playerName, string team)
+        {
+            if (!_matchActive || _currentMatch == null) return;
+
+            _pendingShotByPuck[puckId] = new PendingShotInfo
+            {
+                SteamId = steamId,
+                PlayerName = playerName,
+                Team = team,
+                Timestamp = Time.time
+            };
+
+            GetOrCreatePlayerStats(steamId, playerName).ShotAttempts++;
+        }
+
+        /// <summary>
+        /// Checks if a player touching the puck is blocking a pending shot.
+        /// Called from PatchPuckCollisions.OnCollisionEnter.
+        /// </summary>
+        public static bool CheckShotBlocked(string steamId, int puckId)
+        {
+            if (!_matchActive || _currentMatch == null) return false;
+
+            if (!_pendingShotByPuck.TryGetValue(puckId, out var shot))
+                return false;
+
+            // Same player touching their own shot — not a block
+            if (steamId == shot.SteamId)
+                return false;
+
+            // Check if they're on opposite teams
+            var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
+            if (pm == null) return false;
+
+            var hitter = pm.GetPlayerBySteamId(steamId);
+            var shooter = pm.GetPlayerBySteamId(shot.SteamId);
+            if (hitter == null || shooter == null) return false;
+
+            var hitterTeam = hitter.Team == PlayerTeam.Blue ? "blue"
+                : hitter.Team == PlayerTeam.Red ? "red" : "";
+
+            if (string.IsNullOrEmpty(shot.Team) || string.IsNullOrEmpty(hitterTeam))
+                return false;
+
+            // Blocked if defender and shooter are on opposite teams
+            if (shot.Team != hitterTeam)
+            {
+                OnShotBlocked(steamId, puckId, hitter.Username.Value.ToString());
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Records a blocked shot event.
+        /// </summary>
+        private static void OnShotBlocked(string blockerSteamId, int puckId, string blockerName)
+        {
+            if (!_pendingShotByPuck.TryGetValue(puckId, out var shot))
+                return;
+
+            // Increment blocker's shot blocks
+            if (_currentMatch.Players.TryGetValue(blockerSteamId, out var blockStats))
+                blockStats.ShotsBlocked++;
+
+            // Record play-by-play
+            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+            {
+                Type = "shot_blocked",
+                Team = shot.Team,
+                PlayerName = shot.PlayerName,
+                Detail = $"blocked by {blockerName}"
+            });
+
+            _pendingShotByPuck.Remove(puckId);
+        }
+
+        /// <summary>
+        /// Resolve stale pending shots that never reached the goal
+        /// and weren't blocked — these are missed shots.
+        /// </summary>
+        private static void ResolveStaleShots()
+        {
+            if (_pendingShotByPuck.Count == 0) return;
+
+            var expired = new List<int>();
+            foreach (var kv in _pendingShotByPuck)
+            {
+                if (Time.time - kv.Value.Timestamp > SHOT_TIMEOUT_SECONDS)
+                    expired.Add(kv.Key);
+            }
+            foreach (var id in expired)
+                _pendingShotByPuck.Remove(id);
+        }
+
+        /// <summary>
+        /// Resolve pending goalie GA entries where the puck entered the
+        /// goal area but no goal followed — these are saves.
+        /// </summary>
+        private static void ResolvePendingSaves()
+        {
+            if (_pendingGoalieGA.Count == 0) return;
+
+            foreach (var kv in _pendingGoalieGA)
+            {
+                if (_currentMatch.Players.TryGetValue(kv.Value, out var goalieStats))
+                    goalieStats.Saves++;
+            }
+            _pendingGoalieGA.Clear();
         }
 
         // ── Event handlers ───────────────────────────────────────────────
@@ -143,24 +283,50 @@ namespace SPSMod
 
             var defendingTeam = (PlayerTeam)message["team"];
             var puck = (Puck)message["puck"];
+            int puckId = puck.GetInstanceID();
+
+            // ── Resolve previous pending saves ──
+            // Any _pendingGoalieGA entries not consumed by OnGoalScored = saves
+            ResolvePendingSaves();
 
             var attackingTeam = defendingTeam == PlayerTeam.Blue ? PlayerTeam.Red : PlayerTeam.Blue;
 
-            // ── Shooter: last attacking player to touch the puck ──
-            var attackerCollisions = puck.GetPlayerCollisionsByTeam(attackingTeam);
-            if (attackerCollisions.Count > 0)
+            // ── Shooter: prefer pending shot, fall back to collision buffer ──
+            string shooterSteamId = null;
+            string shooterName = null;
+            string shooterTeamStr = null;
+
+            if (_pendingShotByPuck.TryGetValue(puckId, out var pendingShot))
             {
-                var shooter = attackerCollisions[0].Key;
-                var sid = shooter.SteamId.Value.ToString();
-                var name = shooter.Username.Value.ToString();
-                GetOrCreatePlayerStats(sid, name).Shots++;
+                // Use the shooter who initiated the pending shot
+                shooterSteamId = pendingShot.SteamId;
+                shooterName = pendingShot.PlayerName;
+                shooterTeamStr = pendingShot.Team;
+                _pendingShotByPuck.Remove(puckId);
+            }
+            else
+            {
+                // Fall back to collision buffer (for deflections or sub-threshold shots)
+                var attackerCollisions = puck.GetPlayerCollisionsByTeam(attackingTeam);
+                if (attackerCollisions.Count > 0)
+                {
+                    var shooter = attackerCollisions[attackerCollisions.Count - 1].Key;
+                    shooterSteamId = shooter.SteamId.Value.ToString();
+                    shooterName = shooter.Username.Value.ToString();
+                    shooterTeamStr = attackingTeam == PlayerTeam.Blue ? "blue" : "red";
+                }
+            }
+
+            if (shooterSteamId != null)
+            {
+                GetOrCreatePlayerStats(shooterSteamId, shooterName).Shots++;
 
                 // Record shot in play-by-play
                 _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
                 {
                     Type = "shot",
-                    Team = attackingTeam == PlayerTeam.Blue ? "blue" : "red",
-                    PlayerName = name
+                    Team = shooterTeamStr,
+                    PlayerName = shooterName
                 });
 
                 // Team shots
@@ -188,7 +354,7 @@ namespace SPSMod
                     var gid = defender.SteamId.Value.ToString();
                     var gname = defender.Username.Value.ToString();
                     GetOrCreatePlayerStats(gid, gname).ShotsAgainst++;
-                    _pendingGoalieGA[puck.GetInstanceID()] = gid;
+                    _pendingGoalieGA[puckId] = gid;
                 }
                 else if (defender.Role != PlayerRole.Goalie)
                 {
@@ -211,9 +377,11 @@ namespace SPSMod
 
             var defendingTeam = scoringTeam == PlayerTeam.Blue ? PlayerTeam.Red : PlayerTeam.Blue;
 
-            // ── Goal scorer ──
+            // ── Cache player IDs at handler entry ──
             var scorerId = goalPlayer.SteamId.Value.ToString();
             var scorerName = goalPlayer.Username.Value.ToString();
+
+            // ── Goal scorer ──
             var scorerStats = GetOrCreatePlayerStats(scorerId, scorerName);
             scorerStats.Goals++;
 
@@ -259,7 +427,9 @@ namespace SPSMod
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
             if (pm != null)
             {
-                foreach (var player in pm.GetPlayers())
+                var onIcePlayers = pm.GetPlayers();
+                var matchPlayers = _currentMatch.Players; // cache
+                foreach (var player in onIcePlayers)
                 {
                     if (player.Phase == PlayerPhase.Play)
                     {
@@ -405,10 +575,33 @@ namespace SPSMod
             {
                 if (_matchActive && _currentMatch != null)
                 {
-                    // Update period from game state (the game increments period before Intermission)
                     var gm = GameManager.Instance;
                     if (gm != null)
-                        _currentMatch.Period = gm.GameState.Value.Period;
+                    {
+                        var newPeriod = gm.GameState.Value.Period;
+
+                        // Period ended: Play → Intermission
+                        if (oldState.Phase == GamePhase.Play && newState.Phase == GamePhase.Intermission)
+                        {
+                            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+                            {
+                                Type = "period",
+                                PlayerName = $"End of Period {oldState.Period}"
+                            });
+                        }
+
+                        // Period started: Intermission → FaceOff
+                        if (oldState.Phase == GamePhase.Intermission && newState.Phase == GamePhase.FaceOff)
+                        {
+                            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+                            {
+                                Type = "period",
+                                PlayerName = $"Period {newPeriod}"
+                            });
+                        }
+
+                        _currentMatch.Period = newPeriod;
+                    }
                     PushLive();
                 }
             }
@@ -441,57 +634,40 @@ namespace SPSMod
             System.Threading.Tasks.Task.Run(async () =>
             {
                 await System.Threading.Tasks.Task.Delay(10000);
-                FetchServerNameFromPuckStats(capturedPort);
+                await FetchServerNameFromPuckStats(capturedPort);
             });
         }
 
-        private static void FetchServerNameFromPuckStats(ushort? ownPort)
+        private static async System.Threading.Tasks.Task FetchServerNameFromPuckStats(ushort? ownPort)
         {
             const string ip = "207.2.120.215";
 
             try
             {
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(5);
-                client.DefaultRequestHeaders.Add("User-Agent", "SPSMod/1.0");
-
-                // Try own port first, then scan 1-50
-                var portsToTry = new List<ushort>();
-                if (ownPort.HasValue)
-                    portsToTry.Add(ownPort.Value);
-                for (ushort p = 1; p <= 50; p++)
+                if (ownPort == null)
                 {
-                    if (!portsToTry.Contains(p))
-                        portsToTry.Add(p);
+                    Plugin.Log("No server port available, skipping puckstats.io fetch");
+                    return;
                 }
 
-                foreach (var port in portsToTry)
-                {
-                    try
-                    {
-                        var url = $"https://puckstats.io/api/server-list/server?ip={ip}&port={port}";
-                        var json = client.GetStringAsync(url).Result;
+                var client = StatsApi.Client;
+                var url = $"https://puckstats.io/api/server-list/server?ip={ip}&port={ownPort}";
+                var json = await client.GetStringAsync(url);
 
-                        var data = JObject.Parse(json);
-                        var names = data["names"] as JArray;
-                        if (names != null && names.Count > 0)
-                        {
-                            var firstName = names[0]["name"]?.Value<string>();
-                            if (!string.IsNullOrEmpty(firstName))
-                            {
-                                _serverName = firstName;
-                                Plugin.Log($"Server name '{_serverName}' from puckstats.io API (port {port})");
-                                return;
-                            }
-                        }
-                    }
-                    catch
+                var data = JObject.Parse(json);
+                var names = data["names"] as JArray;
+                if (names != null && names.Count > 0)
+                {
+                    var firstName = names[0]["name"]?.Value<string>();
+                    if (!string.IsNullOrEmpty(firstName))
                     {
-                        // Port has no server or timed out — keep scanning
+                        _serverName = firstName;
+                        Plugin.Log($"Server name '{_serverName}' from puckstats.io API (port {ownPort})");
+                        return;
                     }
                 }
 
-                Plugin.Log($"No server name found on any port 1-50");
+                Plugin.Log($"No server name found at port {ownPort}");
             }
             catch (Exception ex)
             {
@@ -512,6 +688,13 @@ namespace SPSMod
             _playerPlayEnterTime.Clear();
             _pendingFaceoff = false;
             _goalIndex = 0;
+
+            // Add Period 1 start marker at beginning of play-by-play
+            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+            {
+                Type = "period",
+                PlayerName = "Period 1"
+            });
 
             // Snapshot current players
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
@@ -543,6 +726,10 @@ namespace SPSMod
         {
             if (_currentMatch == null) return;
 
+            // Resolve any remaining pending shots and saves
+            ResolveStaleShots();
+            ResolvePendingSaves();
+
             // Flush any remaining TOI (players still in Play phase)
             var pm = MonoBehaviourSingleton<PlayerManager>.Instance;
             if (pm != null)
@@ -562,6 +749,7 @@ namespace SPSMod
                 }
             }
             _playerPlayEnterTime.Clear();
+            PatchPuckCollisions.ClearDictionaries();
 
             // Sync final scores from game state
             var gm = GameManager.Instance;
@@ -611,6 +799,7 @@ namespace SPSMod
                         Goals = kv.Value.Goals,
                         Assists = kv.Value.Assists,
                         Shots = kv.Value.Shots,
+                        ShotAttempts = kv.Value.ShotAttempts,
                         Saves = kv.Value.Saves,
                         ShotsAgainst = kv.Value.ShotsAgainst,
                         GoalsAgainst = kv.Value.GoalsAgainst,
@@ -706,6 +895,10 @@ namespace SPSMod
         {
             if (_currentMatch == null) return;
 
+            // Resolve stale shots and saves before pushing
+            ResolveStaleShots();
+            ResolvePendingSaves();
+
             var state = new LiveMatchState
             {
                 MatchId = _currentMatch.MatchId,
@@ -771,6 +964,7 @@ namespace SPSMod
                     Goals = stats.Goals,
                     Assists = stats.Assists,
                     Shots = stats.Shots,
+                    ShotAttempts = stats.ShotAttempts,
                     Saves = stats.Saves,
                     ShotsAgainst = stats.ShotsAgainst,
                     GoalsAgainst = stats.GoalsAgainst,

@@ -13,7 +13,7 @@ namespace SPSMod
         private const string ChatApiUrl = "https://spsdashboard.vercel.app/api/admin/chat-logs";
         private const string EventsApiUrl = "https://spsdashboard.vercel.app/api/admin/events";
 
-        private static readonly HttpClient _client = new();
+        private static readonly HttpClient _client = StatsApi.Client;
         private static bool _initialized;
 
         public static void Initialize()

@@ -23,6 +23,8 @@ namespace SPSMod
                 StatsTracker.Initialize();
                 ChatTracker.Initialize();
 
+                OptimizeForClientPerformance();
+
                 Plugin.Log("Enabled!");
                 return true;
             }
@@ -55,5 +57,29 @@ namespace SPSMod
 
         public static void LogWarning(string msg) =>
             Debug.LogWarning($"[{MOD_NAME}] {msg}");
+
+        // ── Client FPS Optimizations ─────────────────────────────────────
+
+        /// <summary>
+        /// Applies conservative quality settings to improve FPS on lower-end machines.
+        /// Skips headless/dedicated server builds (no rendering).
+        /// </summary>
+        private static void OptimizeForClientPerformance()
+        {
+            if (Application.isBatchMode)
+                return;
+
+            Log("Applying client performance optimizations...");
+
+            QualitySettings.shadowDistance = 30f;
+            QualitySettings.shadowResolution = ShadowResolution.Low;
+            QualitySettings.softVegetation = false;
+            QualitySettings.globalTextureMipmapLimit = 1;
+            QualitySettings.anisotropicFiltering = AnisotropicFiltering.Disable;
+            QualitySettings.pixelLightCount = 1;
+            QualitySettings.skinWeights = SkinWeights.OneBone;
+
+            Log("Performance optimizations applied (shadows, textures, lighting)");
+        }
     }
 }

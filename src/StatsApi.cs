@@ -7,28 +7,44 @@ namespace SPSMod
 {
     public static class StatsApi
     {
-        private static readonly HttpClient _client = new();
+        internal static readonly HttpClient _client = new();
+
+        public static HttpClient Client => _client;
 
         // ── CHANGE THIS to your Vercel deployment URL ──
         private const string ApiUrl = "https://spsdashboard.vercel.app/api/stats";
 
         public static StatsDatabase Load()
         {
-            try
-            {
-                var response = _client.GetAsync(ApiUrl).GetAwaiter().GetResult();
-                if (response.IsSuccessStatusCode)
-                {
-                    var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    return JsonConvert.DeserializeObject<StatsDatabase>(json) ?? new StatsDatabase();
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log($"StatsApi.Load failed: {ex.Message}");
-            }
-
+            // Return fresh DB immediately — non-blocking
+            // Real data is fetched via LoadAsync which replaces _database in StatsTracker
+            ScheduleAsyncLoad();
             return new StatsDatabase();
+        }
+
+        private static void ScheduleAsyncLoad()
+        {
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    var response = await _client.GetAsync(ApiUrl);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var json = await response.Content.ReadAsStringAsync();
+                        var db = JsonConvert.DeserializeObject<StatsDatabase>(json);
+                        if (db != null)
+                        {
+                            StatsTracker.ReplaceDatabase(db);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log($"StatsApi.Load failed: {ex.Message}");
+                }
+            });
         }
 
         public static void Save(StatsDatabase db)
