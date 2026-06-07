@@ -244,10 +244,11 @@ namespace SPSMod
         {
             if (_pendingShotByPuck.Count == 0) return;
 
-            var expired = new List<int>();
+            var now = Time.time;
+            var expired = new List<int>(_pendingShotByPuck.Count / 2);
             foreach (var kv in _pendingShotByPuck)
             {
-                if (Time.time - kv.Value.Timestamp > SHOT_TIMEOUT_SECONDS)
+                if (now - kv.Value.Timestamp > SHOT_TIMEOUT_SECONDS)
                     expired.Add(kv.Key);
             }
             foreach (var id in expired)

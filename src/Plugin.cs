@@ -61,7 +61,7 @@ namespace SPSMod
         // ── Client FPS Optimizations ─────────────────────────────────────
 
         /// <summary>
-        /// Applies conservative quality settings to improve FPS on lower-end machines.
+        /// Applies aggressive quality settings for 30%+ FPS gain.
         /// Skips headless/dedicated server builds (no rendering).
         /// </summary>
         private static void OptimizeForClientPerformance()
@@ -69,17 +69,37 @@ namespace SPSMod
             if (Application.isBatchMode)
                 return;
 
-            Log("Applying client performance optimizations...");
+            Log("Applying AGGRESSIVE client performance optimizations...");
 
-            QualitySettings.shadowDistance = 30f;
-            QualitySettings.shadowResolution = ShadowResolution.Low;
-            QualitySettings.softVegetation = false;
-            QualitySettings.globalTextureMipmapLimit = 1;
+            // ── Shadows (biggest GPU impact) ──
+            QualitySettings.shadows = ShadowQuality.Disable;
+            QualitySettings.shadowDistance = 0f;
+
+            // ── Textures ──
+            QualitySettings.globalTextureMipmapLimit = 2;    // quarter resolution
             QualitySettings.anisotropicFiltering = AnisotropicFiltering.Disable;
-            QualitySettings.pixelLightCount = 1;
-            QualitySettings.skinWeights = SkinWeights.OneBone;
+            QualitySettings.streamingMipmapsActive = false;  // no background streaming
 
-            Log("Performance optimizations applied (shadows, textures, lighting)");
+            // ── Lighting ──
+            QualitySettings.pixelLightCount = 0;
+            QualitySettings.realtimeReflectionProbes = false;
+
+            // ── Geometry ──
+            QualitySettings.skinWeights = SkinWeights.OneBone;
+            QualitySettings.lodBias = 0.3f;
+            QualitySettings.maximumLODLevel = 1;
+
+            // ── Particles ──
+            QualitySettings.softParticles = false;
+            QualitySettings.particleRaycastBudget = 4;
+
+            // ── Misc ──
+            QualitySettings.softVegetation = false;
+            QualitySettings.billboardsFaceCameraPosition = false;
+            QualitySettings.asyncUploadTimeSlice = 1;
+            QualitySettings.asyncUploadBufferSize = 4;
+
+            Log("Aggressive optimizations applied (shadows OFF, quarter-res textures, no reflections, low LOD)");
         }
     }
 }

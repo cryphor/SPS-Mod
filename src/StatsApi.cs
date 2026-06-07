@@ -70,21 +70,20 @@ namespace SPSMod
 
         public static void PushLiveState(LiveMatchState state)
         {
-            try
+            // Offload serialization + HTTP to background thread to avoid main-thread spikes
+            _ = System.Threading.Tasks.Task.Run(async () =>
             {
-                var json = JsonConvert.SerializeObject(state, Formatting.None);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                _ = _client.PostAsync(LiveApiUrl, content).ContinueWith(t =>
+                try
                 {
-                    if (t.Exception != null)
-                        Plugin.LogWarning($"PushLiveState failed: {t.Exception.InnerException?.Message}");
-                });
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogWarning($"PushLiveState error: {ex.Message}");
-            }
+                    var json = JsonConvert.SerializeObject(state, Formatting.None);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await _client.PostAsync(LiveApiUrl, content);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogWarning($"PushLiveState error: {ex.Message}");
+                }
+            });
         }
     }
 }
