@@ -28,8 +28,8 @@ namespace SPSMod
         // ── Goal sequence for GWG computation ──
         private static int _goalIndex;
 
-        // ── 30s live push timer ──
-        private static CancellationTokenSource _livePushCts;
+        // ── 30s live push timer (main-thread safe) ──
+        private static DateTime _lastPushTime = DateTime.MinValue;
 
         // ── Player session data (survives disconnect for live view) ──
         private class PlayerLiveInfo
@@ -412,6 +412,13 @@ namespace SPSMod
                     PushLive();
                 }
             }
+
+            // 30-second periodic live push (main-thread safe, no background timer)
+            if (_matchActive && _currentMatch != null && (DateTime.UtcNow - _lastPushTime).TotalSeconds >= 30)
+            {
+                _lastPushTime = DateTime.UtcNow;
+                PushLive();
+            }
         }
 
         // ── Server name from puckstats.io ──────────────────────────────
@@ -496,9 +503,6 @@ namespace SPSMod
 
         private static void StartNewMatch()
         {
-            // Re-fetch from API to pick up any external changes (e.g. data reset)
-            _database = StatsApi.Load();
-
             _currentMatch = new MatchRecord
             {
                 Timestamp = DateTime.UtcNow.ToString("o")
@@ -531,22 +535,8 @@ namespace SPSMod
             Plugin.Log("New match started");
 
             // Push initial live state
+            _lastPushTime = DateTime.UtcNow;
             PushLive();
-
-            // Start 30-second periodic live push
-            _livePushCts?.Cancel();
-            _livePushCts = new CancellationTokenSource();
-            var token = _livePushCts.Token;
-            System.Threading.Tasks.Task.Run(async () =>
-            {
-                while (!token.IsCancellationRequested)
-                {
-                    try { await System.Threading.Tasks.Task.Delay(30000, token); }
-                    catch (System.Threading.Tasks.TaskCanceledException) { break; }
-                    if (_matchActive && _currentMatch != null)
-                        PushLive();
-                }
-            });
         }
 
         private static void FinalizeMatch()
@@ -636,7 +626,6 @@ namespace SPSMod
             StatsApi.PushLiveState(finalState);
 
             _matchActive = false;
-            _livePushCts?.Cancel();
             var mId = _currentMatch.MatchId;
             _currentMatch = null;
 

@@ -37,16 +37,12 @@ namespace SPSMod
             {
                 var json = JsonConvert.SerializeObject(db, Formatting.None);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
-                var response = _client.PostAsync(ApiUrl, content).GetAwaiter().GetResult();
 
-                if (response.IsSuccessStatusCode)
+                _ = _client.PostAsync(ApiUrl, content).ContinueWith(t =>
                 {
-                    Plugin.Log("Stats saved to API");
-                }
-                else
-                {
-                    Plugin.LogWarning($"StatsApi.Save failed: {response.StatusCode}");
-                }
+                    if (t.Exception != null)
+                        Plugin.LogWarning($"StatsApi.Save failed: {t.Exception.InnerException?.Message}");
+                });
             }
             catch (Exception ex)
             {
@@ -62,9 +58,17 @@ namespace SPSMod
             {
                 var json = JsonConvert.SerializeObject(state, Formatting.None);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
-                var response = _client.PostAsync(LiveApiUrl, content).GetAwaiter().GetResult();
+
+                _ = _client.PostAsync(LiveApiUrl, content).ContinueWith(t =>
+                {
+                    if (t.Exception != null)
+                        Plugin.LogWarning($"PushLiveState failed: {t.Exception.InnerException?.Message}");
+                });
             }
-            catch { /* fire-and-forget, don't spam logs */ }
+            catch (Exception ex)
+            {
+                Plugin.LogWarning($"PushLiveState error: {ex.Message}");
+            }
         }
     }
 }

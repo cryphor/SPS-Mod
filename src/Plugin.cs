@@ -21,6 +21,7 @@ namespace SPSMod
                 Plugin.Log("Harmony patches applied");
 
                 StatsTracker.Initialize();
+                ChatTracker.Initialize();
 
                 Plugin.Log("Enabled!");
                 return true;
@@ -37,6 +38,7 @@ namespace SPSMod
             Plugin.Log("Disabling...");
 
             StatsTracker.Shutdown();
+            ChatTracker.Shutdown();
             _harmony.UnpatchSelf();
 
             Plugin.Log("Disabled!");

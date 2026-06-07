@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SPSMod")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7b76d4d31f341429350db4f54353de15aca66125")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ee6a373b4961f9918e17faf6302f926f7ac616ce")]
 [assembly: System.Reflection.AssemblyProductAttribute("SPSMod")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SPSMod")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -29,6 +29,7 @@
     <Compile Include="src\StatsTracker.cs" />
     <Compile Include="src\PatchPuckCollisions.cs" />
     <Compile Include="src\StatsApi.cs" />
+    <Compile Include="src\ChatTracker.cs" />
   </ItemGroup>
 
   <Target Name="CopyToPlugins" AfterTargets="Build">
