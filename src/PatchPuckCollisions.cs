@@ -75,6 +75,17 @@ namespace SPSMod
                 LastStickerByPuck[puckId] = enteringSteamId;
                 LastLeaverByPuck.Remove(puckId); // stale leaver from destroyed/reset puck
             }
+            else if (StatsTracker.IsMatchActiveInternal())
+            {
+                // Body collision with goalie (non-stick save) — no Stick component
+                Player player = collision.gameObject.GetComponentInParent<Player>();
+                if (player != null && player.SteamId != null && player.Role == PlayerRole.Goalie)
+                {
+                    string goalieSteamId = player.SteamId.Value.ToString();
+                    if (StatsTracker.ProcessGoalieBodySave(goalieSteamId, __instance.GetInstanceID(), player.Username.Value.ToString()))
+                        return;
+                }
+            }
         }
 
         [HarmonyPostfix]

@@ -36,6 +36,12 @@ namespace SPSMod
         private static readonly Dictionary<int, PendingShotInfo> _pendingShotByPuck = new();
         private const float SHOT_TIMEOUT_SECONDS = 3.0f;
 
+        // ── Goalie save tracking ──
+        // Puck instance ID → goalie steamId for shots the goalie touched
+        // (stick save or body save). Resolved as either a save or a goal
+        // depending on whether the puck enters the net.
+        private static readonly Dictionary<int, string> _pendingGoalieTouch = new();
+
         // ── Goal sequence for GWG computation ──
         private static int _goalIndex;
 
@@ -162,6 +168,19 @@ namespace SPSMod
         {
             if (!_matchActive || _currentMatch == null) return;
 
+            // If this puck has a stale goalie touch from a previous shot
+            // (e.g., rebound), resolve it as a save now before recording
+            // the new shot attempt.
+            if (_pendingGoalieTouch.TryGetValue(puckId, out var oldGoalieId))
+            {
+                if (_currentMatch.Players.TryGetValue(oldGoalieId, out var oldGoalieStats))
+                {
+                    oldGoalieStats.Saves++;
+                    oldGoalieStats.ShotsAgainst++;
+                }
+                _pendingGoalieTouch.Remove(puckId);
+            }
+
             _pendingShotByPuck[puckId] = new PendingShotInfo
             {
                 SteamId = steamId,
@@ -174,8 +193,44 @@ namespace SPSMod
         }
 
         /// <summary>
+        /// Fast guard for PatchPuckCollisions body-collision check.
+        /// Avoids expensive GetComponentInParent when no match is active.
+        /// </summary>
+        internal static bool IsMatchActiveInternal() => _matchActive && _currentMatch != null;
+
+        /// <summary>
+        /// Called from PatchPuckCollisions when the puck hits a goalie's body
+        /// (non-stick collision). Records the shot as on-net and marks the
+        /// goalie touch for later resolution (save or goal).
+        /// </summary>
+        internal static bool ProcessGoalieBodySave(string goalieSteamId, int puckId, string goalieName)
+        {
+            if (!_matchActive || _currentMatch == null) return false;
+            if (!_pendingShotByPuck.TryGetValue(puckId, out var shot)) return false;
+
+            _pendingGoalieTouch[puckId] = goalieSteamId;
+
+            // Shooter's shot on goal
+            GetOrCreatePlayerStats(shot.SteamId, shot.PlayerName).Shots++;
+
+            _pendingShotByPuck.Remove(puckId);
+
+            // Play-by-play
+            _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+            {
+                Type = "shot",
+                Team = shot.Team,
+                PlayerName = shot.PlayerName,
+                Detail = $"saved by {goalieName}"
+            });
+
+            return true;
+        }
+
+        /// <summary>
         /// Checks if a player touching the puck is blocking a pending shot.
         /// Called from PatchPuckCollisions.OnCollisionEnter.
+        /// If the blocker is a goalie, records a save instead of a block.
         /// </summary>
         public static bool CheckShotBlocked(string steamId, int puckId)
         {
@@ -195,6 +250,28 @@ namespace SPSMod
             var hitter = pm.GetPlayerBySteamId(steamId);
             var shooter = pm.GetPlayerBySteamId(shot.SteamId);
             if (hitter == null || shooter == null) return false;
+
+            // NEW: Goalie save — this is a save, not a blocked shot
+            if (hitter.Role == PlayerRole.Goalie)
+            {
+                _pendingGoalieTouch[puckId] = steamId;
+
+                // Shooter's shot on goal
+                GetOrCreatePlayerStats(shot.SteamId, shot.PlayerName).Shots++;
+
+                _pendingShotByPuck.Remove(puckId);
+
+                // Play-by-play
+                _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
+                {
+                    Type = "shot",
+                    Team = shot.Team,
+                    PlayerName = shot.PlayerName,
+                    Detail = $"saved by {hitter.Username.Value.ToString()}"
+                });
+
+                return true;
+            }
 
             var hitterTeam = hitter.Team == PlayerTeam.Blue ? "blue"
                 : hitter.Team == PlayerTeam.Red ? "red" : "";
@@ -258,9 +335,26 @@ namespace SPSMod
         /// <summary>
         /// Resolve pending goalie GA entries where the puck entered the
         /// goal area but no goal followed — these are saves.
+        /// Also resolve goalie touch entries where the goalie saved a shot
+        /// but the puck didn't enter the net.
         /// </summary>
         private static void ResolvePendingSaves()
         {
+            // Resolve goalie touches → saves (goalie touched puck, no goal followed)
+            if (_pendingGoalieTouch.Count > 0)
+            {
+                foreach (var kv in _pendingGoalieTouch)
+                {
+                    if (_currentMatch.Players.TryGetValue(kv.Value, out var goalieStats))
+                    {
+                        goalieStats.Saves++;
+                        goalieStats.ShotsAgainst++;
+                    }
+                }
+                _pendingGoalieTouch.Clear();
+            }
+
+            // Resolve existing _pendingGoalieGA entries → saves
             if (_pendingGoalieGA.Count == 0) return;
 
             foreach (var kv in _pendingGoalieGA)
@@ -277,8 +371,6 @@ namespace SPSMod
         {
             if (!_matchActive || _currentMatch == null) return;
 
-            // Only count shots during active Play phase — prevents dribbles,
-            // practice pucks, and post-goal pucks from inflating shot totals
             var gm = GameManager.Instance;
             if (gm == null || gm.GameState.Value.Phase != GamePhase.Play) return;
 
@@ -286,8 +378,15 @@ namespace SPSMod
             var puck = (Puck)message["puck"];
             int puckId = puck.GetInstanceID();
 
+            // ── Check if goalie already touched this puck ──
+            // If so, Shots and ShotsAgainst were already recorded by the
+            // collision handler. We still set _pendingGoalieGA so
+            // OnGoalScored can track GoalsAgainst, but skip ShotsAgainst.
+            bool goalieAlreadyTouched = _pendingGoalieTouch.Remove(puckId);
+
             // ── Resolve previous pending saves ──
             // Any _pendingGoalieGA entries not consumed by OnGoalScored = saves
+            // Any remaining _pendingGoalieTouch entries not consumed here = saves too
             ResolvePendingSaves();
 
             var attackingTeam = defendingTeam == PlayerTeam.Blue ? PlayerTeam.Red : PlayerTeam.Blue;
@@ -305,7 +404,7 @@ namespace SPSMod
                 shooterTeamStr = pendingShot.Team;
                 _pendingShotByPuck.Remove(puckId);
             }
-            else
+            else if (!goalieAlreadyTouched)
             {
                 // Fall back to collision buffer (for deflections or sub-threshold shots)
                 var attackerCollisions = puck.GetPlayerCollisionsByTeam(attackingTeam);
@@ -320,7 +419,9 @@ namespace SPSMod
 
             if (shooterSteamId != null)
             {
-                GetOrCreatePlayerStats(shooterSteamId, shooterName).Shots++;
+                // Only count Shots if the goalie didn't already record it
+                if (!goalieAlreadyTouched)
+                    GetOrCreatePlayerStats(shooterSteamId, shooterName).Shots++;
 
                 // Record shot in play-by-play
                 _currentMatch.PlayByPlay.Add(new PlayByPlayEvent
@@ -354,7 +455,8 @@ namespace SPSMod
                     goalieFound = true;
                     var gid = defender.SteamId.Value.ToString();
                     var gname = defender.Username.Value.ToString();
-                    GetOrCreatePlayerStats(gid, gname).ShotsAgainst++;
+                    if (!goalieAlreadyTouched)
+                        GetOrCreatePlayerStats(gid, gname).ShotsAgainst++;
                     _pendingGoalieGA[puckId] = gid;
                 }
                 else if (defender.Role != PlayerRole.Goalie)
@@ -686,6 +788,7 @@ namespace SPSMod
             };
             _matchActive = true;
             _pendingGoalieGA.Clear();
+            _pendingGoalieTouch.Clear();
             _playerPlayEnterTime.Clear();
             _pendingFaceoff = false;
             _goalIndex = 0;
